@@ -1,7 +1,8 @@
 import binascii
-
+import os
 from scapy.all import Packet, IntField
-
+from scapy.config import conf
+conf.route.resync = lambda: None  # Override route resync method
 
 class PacketHeader(Packet):
     name = "PacketHeader"

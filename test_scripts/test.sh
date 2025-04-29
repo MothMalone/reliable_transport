@@ -7,7 +7,7 @@ fi
 
 DIR=$(dirname $(realpath $0))
 FOLDER_PATH=$1
-PYTHON_PATH=$(which python3)
+PYTHON_PATH=$(which python)
 PORT_RECV=40000
 PORT_SEND=50000
 WINDOW_SIZE=128

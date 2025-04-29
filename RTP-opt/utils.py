@@ -1,4 +1,5 @@
 import binascii
+import six
 
 from scapy.all import Packet, IntField
 
