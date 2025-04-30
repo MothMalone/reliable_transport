@@ -1,45 +1,62 @@
 import argparse
 import socket
-
+import sys
 from utils import PacketHeader, compute_checksum
 
-
 def receiver(receiver_ip, receiver_port, window_size):
-    """TODO: Listen on socket and print received message to sys.stdout."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.bind((receiver_ip, receiver_port))
+
+    expected = 1
+    buffer = {}    # seq_num → payload bytes
+    connection_active = False
+
     while True:
-        # Receive packet; address includes both IP and port
-        pkt, address = s.recvfrom(2048)
+        pkt, addr = s.recvfrom(1472)
+        hdr = PacketHeader(pkt[:16])
+        data = pkt[16:16+hdr.length]
 
-        # Extract header and payload
-        pkt_header = PacketHeader(pkt[:16])
-        msg = pkt[16 : 16 + pkt_header.length]
+        # checksum
+        orig = hdr.checksum; hdr.checksum = 0
+        if compute_checksum(hdr / data) != orig:
+            continue
 
-        # Verity checksum
-        pkt_checksum = pkt_header.checksum
-        pkt_header.checksum = 0
-        computed_checksum = compute_checksum(pkt_header / msg)
-        if pkt_checksum != computed_checksum:
-            print("checksums not match")
-        print(msg)
+        if hdr.type == 0 and not connection_active:
+            # START
+            connection_active = True
+            ack = PacketHeader(type=3, seq_num=1, length=0)
+            ack.checksum = compute_checksum(ack / b'')
+            s.sendto(bytes(ack / b''), addr)
 
+        elif hdr.type == 2 and connection_active:
+            seq = hdr.seq_num
+            # drop if outside [expected, expected+window_size)
+            if seq < expected or seq >= expected + window_size:
+                continue
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "receiver_ip", help="The IP address of the host that receiver is running on"
-    )
-    parser.add_argument(
-        "receiver_port", type=int, help="The port number on which receiver is listening"
-    )
-    parser.add_argument(
-        "window_size", type=int, help="Maximum number of outstanding packets"
-    )
-    args = parser.parse_args()
+            # send individual ACK
+            ack = PacketHeader(type=3, seq_num=seq, length=0)
+            ack.checksum = compute_checksum(ack / b'')
+            s.sendto(bytes(ack / b''), addr)
 
-    receiver(args.receiver_ip, args.receiver_port, args.window_size)
+            # buffer & deliver in order
+            if seq not in buffer:
+                buffer[seq] = data
+            while expected in buffer:
+                sys.stdout.buffer.write(buffer.pop(expected))
+                sys.stdout.flush()
+                expected += 1
 
+        elif hdr.type == 1 and connection_active:
+            # END
+            ack = PacketHeader(type=3, seq_num=hdr.seq_num+1, length=0)
+            ack.checksum = compute_checksum(ack / b'')
+            s.sendto(bytes(ack / b''), addr)
+            break
 
 if __name__ == "__main__":
-    main()
+    p = argparse.ArgumentParser()
+    p.add_argument("receiver_ip"); p.add_argument("receiver_port", type=int)
+    p.add_argument("window_size", type=int)
+    args = p.parse_args()
+    receiver(args.receiver_ip, args.receiver_port, args.window_size)
