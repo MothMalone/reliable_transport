@@ -6,57 +6,93 @@ from utils import PacketHeader, compute_checksum
 def receiver(receiver_ip, receiver_port, window_size):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.bind((receiver_ip, receiver_port))
-    print(f"Receiver listening on {receiver_ip}:{receiver_port}\n", file=sys.stderr)
 
+    print(f"Receiver listening on {receiver_ip}:{receiver_port}\n", file=sys.stderr) 
+
+    expected_seq_num = 0
+    buffer = {}  # For out-of-order packets
     connection_active = False
-    expected_seq = 0
-    buffer = {}
 
+    
     while True:
-        pkt, addr = s.recvfrom(1472)
-        hdr = PacketHeader(pkt[:16])
-        msg = pkt[16:16+hdr.length]
+        pkt, address = s.recvfrom(1472)
+        
+        # Extract header and payload
+        pkt_header = PacketHeader(pkt[:16])
+        msg = pkt[16:16+pkt_header.length]
 
-        # START handshake (as before)
-        if hdr.type == 0 and not connection_active:
-            connection_active = True
-            expected_seq = 1
-            ack = PacketHeader(type=3, seq_num=1, length=0)
-            ack.checksum = compute_checksum(ack / b'')
-            s.sendto(bytes(ack / b''), addr)
+        print(f"\nReceived packet: type={pkt_header.type}, seq={pkt_header.seq_num}, len={pkt_header.length}", file=sys.stderr)
+
+        # Verify checksum
+        original_checksum = pkt_header.checksum
+        pkt_header.checksum = 0
+        computed_checksum = compute_checksum(pkt_header / msg)
+        
+        if original_checksum != computed_checksum:
+            # Corrupted packet, ignore
+            print(f"Checksum mismatch: got {original_checksum}, computed {computed_checksum}", file=sys.stderr)
             continue
+        
+        # Process different packet types
+        if pkt_header.type == 0:  # START
+            if not connection_active:
+                connection_active = True
+                expected_seq_num = 1
+                # Send ACK for START
+                ack_header = PacketHeader(type=3, seq_num=1, length=0)
+                ack_header.checksum = compute_checksum(ack_header / b'')
+                s.sendto(bytes(ack_header / b''), address)
+        
+        elif pkt_header.type == 1:  # END
+            if connection_active:
+                # Send ACK for END
+                ack_header = PacketHeader(type=3, seq_num=pkt_header.seq_num + 1, length=0)
+                ack_header.checksum = compute_checksum(ack_header / b'')
+                s.sendto(bytes(ack_header / b''), address)
+                # Exit the connection
+                break
+        
+        elif pkt_header.type == 2 and connection_active:  # DATA
+            sys.stdout.flush()
+            seq_num = pkt_header.seq_num
 
-        # DATA processing
-        if hdr.type == 2 and connection_active:
-            # checksum verify
-            orig, hdr.checksum = hdr.checksum, 0
-            if compute_checksum(hdr / msg) != orig:
+            print(f"Processing DATA packet {seq_num}, expecting {expected_seq_num}", file=sys.stderr)
+            print(f"Buffer state: {sorted(buffer.keys())}", file=sys.stderr)
+
+            
+            # Drop packets outside the window
+            if seq_num >= expected_seq_num + window_size:
                 continue
-
-            seq = hdr.seq_num
-            # drop outside window
-            if seq < expected_seq or seq >= expected_seq + window_size:
-                continue
-            buffer[seq] = msg
-
-            # deliver in-order
-            while expected_seq in buffer:
-                sys.stdout.buffer.write(buffer.pop(expected_seq))
-                expected_seq += 1
-
-            # send cumulative ACK
-            ack = PacketHeader(type=3, seq_num=expected_seq, length=0)
-            ack.checksum = compute_checksum(ack / b'')
-            s.sendto(bytes(ack / b''), addr)
-
-        # (END handshake deferred to next commit)
+                
+            # Store the packet
+            if seq_num >= expected_seq_num:
+                buffer[seq_num] = msg
+            
+            # Process in-order packets
+            while expected_seq_num in buffer:
+                sys.stdout.buffer.write(buffer[expected_seq_num])
+                sys.stdout.flush()
+                del buffer[expected_seq_num]
+                expected_seq_num += 1
+            
+            # Send cumulative ACK
+            ack_header = PacketHeader(type=3, seq_num=expected_seq_num, length=0)
+            ack_header.checksum = compute_checksum(ack_header / b'')
+            s.sendto(bytes(ack_header / b''), address)
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("receiver_ip")
-    parser.add_argument("receiver_port", type=int)
-    parser.add_argument("window_size", type=int)
+    parser.add_argument(
+        "receiver_ip", help="The IP address of the host that receiver is running on"
+    )
+    parser.add_argument(
+        "receiver_port", type=int, help="The port number on which receiver is listening"
+    )
+    parser.add_argument(
+        "window_size", type=int, help="Maximum number of outstanding packets"
+    )
     args = parser.parse_args()
+
     receiver(args.receiver_ip, args.receiver_port, args.window_size)
 
 if __name__ == "__main__":
